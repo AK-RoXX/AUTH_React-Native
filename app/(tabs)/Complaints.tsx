@@ -1,11 +1,12 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { StyleSheet, Image, TextInput, TouchableOpacity, View, Text, Alert, ActivityIndicator, ScrollView } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { collection, addDoc, Timestamp } from 'firebase/firestore';
-import { db, storage, auth } from '../../lib/firebase';
+import { db, auth } from '../../lib/firebase';
 import { LinearGradient } from 'expo-linear-gradient';
 import Animated, { FadeIn, FadeOut } from 'react-native-reanimated';
+import * as FileSystem from 'expo-file-system';
+import * as Location from 'expo-location';
 
 // Complaint Types
 const COMPLAINT_TYPES = [
@@ -25,82 +26,156 @@ export default function TabTwoScreen() {
   const [description, setDescription] = useState('');
   const [imageUri, setImageUri] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [location, setLocation] = useState(null);
+  const [locationPermission, setLocationPermission] = useState(null);
+  const [locationError, setLocationError] = useState(null);
+
+  // Request location permissions on component mount
+  useEffect(() => {
+    (async () => {
+      let { status } = await Location.requestForegroundPermissionsAsync();
+      setLocationPermission(status === 'granted');
+      
+      if (status !== 'granted') {
+        setLocationError('Permission to access location was denied');
+        return;
+      }
+
+      try {
+        // Get user's current location
+        let currentLocation = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Balanced,
+        });
+        setLocation(currentLocation);
+      } catch (err) {
+        setLocationError('Error getting location');
+        console.error('Location error:', err);
+      }
+    })();
+  }, []);
+
+  const refreshLocation = async () => {
+    if (!locationPermission) {
+      // Ask for permission again if it was denied
+      let { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission needed', 'Location permission is required to attach your location to the complaint.');
+        return;
+      }
+      setLocationPermission(true);
+    }
+
+    try {
+      setLocationError(null);
+      // Get user's current location again
+      let currentLocation = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+      setLocation(currentLocation);
+      Alert.alert('Location Updated', 'Your current location has been captured.');
+    } catch (err) {
+      setLocationError('Error getting location');
+      Alert.alert('Location Error', 'Unable to get your current location. Please try again.');
+      console.error('Location refresh error:', err);
+    }
+  };
 
   const pickImage = async () => {
     const { granted } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!granted) return alert("Permission to access gallery is required!");
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8 });
+    const result = await ImagePicker.launchImageLibraryAsync({ 
+      mediaTypes: ImagePicker.MediaTypeOptions.Images, 
+      quality: 0.5, // Lower quality to reduce base64 size
+      allowsEditing: true,
+      aspect: [4, 3],
+    });
     if (!result.canceled) setImageUri(result.assets[0].uri);
   };
 
   const takePhoto = async () => {
     const { granted } = await ImagePicker.requestCameraPermissionsAsync();
     if (!granted) return alert("Permission to access camera is required!");
-    const result = await ImagePicker.launchCameraAsync({ quality: 0.8 });
+    const result = await ImagePicker.launchCameraAsync({ 
+      quality: 0.5, // Lower quality to reduce base64 size
+      allowsEditing: true,
+      aspect: [4, 3],
+    });
     if (!result.canceled) setImageUri(result.assets[0].uri);
   };
 
-  const uploadImageAsync = async (uri) => {
-    const response = await fetch(uri);
-    const blob = await response.blob();
-    const userId = auth.currentUser?.uid || 'anonymous';
-    const filename = `${userId}_${Date.now()}.jpg`;
-    const imageRef = ref(storage, `complaints/${filename}`);
-    await uploadBytes(imageRef, blob);
-    return await getDownloadURL(imageRef);
+  // Convert image URI to base64
+  const getImageBase64 = async (uri) => {
+    try {
+      const base64 = await FileSystem.readAsStringAsync(uri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      return base64;
+    } catch (error) {
+      console.error("Error converting image to base64:", error);
+      throw error;
+    }
   };
 
   const handleSubmit = async () => {
     if (!userName || !complaintType || !title || !description) {
-      Alert.alert("Required Fields Missing", "Please fill in your name, complaint type, title, and description.");
-      return;
+      return Alert.alert(
+        "Required Fields Missing",
+        "Please fill in your name, complaint type, title, and description."
+      );
     }
 
     setLoading(true);
 
+    // Base complaint data
     const complaintData = {
       userName,
       complaintType,
       title,
       description,
-      imageUrl: "",
+      imageBase64: "",    // Will fill in if conversion succeeds
       status: "New",
       createdAt: Timestamp.now(),
       userId: auth.currentUser?.uid || 'anonymous'
     };
 
+    // Add location data if available
+    if (location) {
+      complaintData.location = {
+        latitude: location.coords.latitude,
+        longitude: location.coords.longitude,
+        accuracy: location.coords.accuracy
+      };
+    }
+
     try {
+      // If there's an image, convert it to base64
       if (imageUri) {
         try {
-          const imageUrl = await uploadImageAsync(imageUri);
-          complaintData.imageUrl = imageUrl;
-        } catch (error) {
+          const base64Data = await getImageBase64(imageUri);
+          complaintData.imageBase64 = `data:image/jpeg;base64,${base64Data}`;
+        } catch (conversionErr) {
+          console.warn("⚠️ Image conversion failed:", conversionErr);
           Alert.alert(
-            "Image Upload Failed",
-            "Do you want to submit your complaint without the image?",
-            [
-              { text: "Cancel", style: "cancel", onPress: () => setLoading(false) },
-              {
-                text: "Submit Without Image", onPress: async () => {
-                  await addDoc(collection(db, 'complaints'), complaintData);
-                  Alert.alert("Success", "Your complaint has been submitted successfully");
-                  resetForm();
-                  setLoading(false);
-                }
-              }
-            ]
+            "Image Processing Failed",
+            "We couldn't process your photo, but we'll still submit your complaint without it."
           );
-          return;
         }
       }
 
-      await addDoc(collection(db, 'complaints'), complaintData);
-      Alert.alert("Success", "Your complaint has been submitted successfully");
+      // Write to Firestore
+      const docRef = await addDoc(collection(db, 'complaints'), complaintData);
+      console.log("✅ Complaint submitted with ID:", docRef.id);
+
+      Alert.alert("Success", "Your complaint has been submitted successfully!");
       resetForm();
     } catch (error) {
-      console.error("Error submitting complaint:", error);
+      console.error("❌ Error submitting complaint:", error);
+      // Distinguish permission errors
       if (error.code === 'permission-denied') {
-        Alert.alert("Error", "You don't have permission to submit complaints. Please log in again.");
+        Alert.alert(
+          "Permission Denied",
+          "You don't have permission to submit complaints. Please log in again."
+        );
       } else {
         Alert.alert("Error", "Something went wrong. Please try again later.");
       }
@@ -115,6 +190,7 @@ export default function TabTwoScreen() {
     setTitle('');
     setDescription('');
     setImageUri(null);
+    // Note: We don't reset location as we want to keep it between submissions
   };
 
   const toggleTypeDropdown = () => setShowTypeDropdown(!showTypeDropdown);
@@ -156,6 +232,29 @@ export default function TabTwoScreen() {
             value={description}
             onChangeText={setDescription}
           />
+
+          {/* Location Section */}
+          <View style={styles.locationContainer}>
+            <View style={styles.locationHeader}>
+              <Text style={styles.locationTitle}>📍 Location</Text>
+              <TouchableOpacity 
+                style={styles.refreshLocationBtn} 
+                onPress={refreshLocation}
+              >
+                <Text style={styles.refreshLocationText}>Refresh</Text>
+              </TouchableOpacity>
+            </View>
+            
+            {locationError ? (
+              <Text style={styles.locationError}>{locationError}</Text>
+            ) : location ? (
+              <Text style={styles.locationSuccess}>
+                Location captured: {location.coords.latitude.toFixed(5)}, {location.coords.longitude.toFixed(5)}
+              </Text>
+            ) : (
+              <Text style={styles.locationPending}>Getting your location...</Text>
+            )}
+          </View>
 
           <View style={styles.imageButtons}>
             <TouchableOpacity style={styles.imageBtn} onPress={pickImage}>
@@ -258,6 +357,48 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#333',
   },
+  // Location styles
+  locationContainer: {
+    backgroundColor: '#f5f5f5',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 15,
+  },
+  locationHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  locationTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#333',
+  },
+  refreshLocationBtn: {
+    backgroundColor: '#e0e0e0',
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 6,
+  },
+  refreshLocationText: {
+    fontSize: 12,
+    color: '#555',
+  },
+  locationSuccess: {
+    color: '#388e3c',
+    fontSize: 14,
+  },
+  locationError: {
+    color: '#d32f2f',
+    fontSize: 14,
+  },
+  locationPending: {
+    color: '#1976d2',
+    fontSize: 14,
+    fontStyle: 'italic',
+  },
+  // Image styles
   imageButtons: {
     flexDirection: 'row',
     justifyContent: 'space-between',
