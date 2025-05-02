@@ -1,13 +1,15 @@
+
 ## This is a Complaint's Lodging Mobile App Created using React Native
+-(Created by Ankit Maity, Anish Godse, Geet Kale)
 
 This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
 
 ## Get started
 
-1. Clone the repository (location branch is latest)
+1. Clone the repository ('location' branch is latest)
 
    ```bash
-   git clone 
+   git clone -b location https://github.com/AK-RoXX/AUTH_React-Native.git 
    ```
 
 3. Install dependencies
